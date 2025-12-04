@@ -397,7 +397,7 @@ func NewMutableState(
 
 	s.mustInitHSM()
 
-	if s.config.EnableChasm() {
+	if s.config.EnableChasm(namespaceEntry.Name().String()) {
 		s.chasmTree = chasm.NewEmptyTree(
 			shard.ChasmRegistry(),
 			shard.GetTimeSource(),
@@ -542,7 +542,7 @@ func NewMutableStateFromDB(
 		mutableState.chasmNodeSizes[key] = nodeSize
 	}
 
-	if shard.GetConfig().EnableChasm() {
+	if shard.GetConfig().EnableChasm(namespaceEntry.Name().String()) {
 		var err error
 		mutableState.chasmTree, err = chasm.NewTreeFromDB(
 			dbRecord.ChasmNodes,
@@ -5193,6 +5193,7 @@ func (ms *MutableStateImpl) AddWorkflowExecutionOptionsUpdatedEvent(
 	attachCompletionCallbacks []*commonpb.Callback,
 	links []*commonpb.Link,
 	identity string,
+	priority *commonpb.Priority,
 ) (*historypb.HistoryEvent, error) {
 	if err := ms.checkMutability(tag.WorkflowActionWorkflowOptionsUpdated); err != nil {
 		return nil, err
@@ -5204,6 +5205,7 @@ func (ms *MutableStateImpl) AddWorkflowExecutionOptionsUpdatedEvent(
 		attachCompletionCallbacks,
 		links,
 		identity,
+		priority,
 	)
 	prevEffectiveVersioningBehavior := ms.GetEffectiveVersioningBehavior()
 	prevEffectiveDeployment := ms.GetEffectiveDeployment()
@@ -5254,6 +5256,14 @@ func (ms *MutableStateImpl) ApplyWorkflowExecutionOptionsUpdatedEvent(event *his
 		attributes.GetAttachedCompletionCallbacks(),
 	); err != nil {
 		return err
+	}
+
+	// Update priority.
+	if attributes.GetPriority() != nil {
+		if !proto.Equal(ms.executionInfo.Priority, attributes.GetPriority()) {
+			requestReschedulePendingWorkflowTask = true
+		}
+		ms.executionInfo.Priority = attributes.GetPriority()
 	}
 
 	// Finally, reschedule the pending workflow task if so requested.
@@ -6411,6 +6421,17 @@ func (ms *MutableStateImpl) processCloseCallbacksHsm() error {
 
 // processCloseCallbacksChasm triggers "WorkflowClosed" callbacks using the CHASM implementation.
 func (ms *MutableStateImpl) processCloseCallbacksChasm() error {
+	wf, _, err := ms.ChasmWorkflowComponentReadOnly(context.Background())
+	if err != nil {
+		return err
+	}
+
+	// Return early if there are no chasm callbacks to process.
+	if len(wf.Callbacks) == 0 {
+		return nil
+	}
+
+	// If there are callbacks to process, create a writable workflow component.
 	wf, ctx, err := ms.ChasmWorkflowComponent(context.Background())
 	if err != nil {
 		return err
